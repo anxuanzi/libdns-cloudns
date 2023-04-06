@@ -8,10 +8,10 @@ import (
 )
 
 var (
-	TAuthId       = "10341"
+	TAuthId       = ""
 	TSubAuthId    = ""
-	TAuthPassword = "MU1DchJVnjfwpolTLYIi7NEgvrA3Buys"
-	TZone         = "wshops.info"
+	TAuthPassword = ""
+	TZone         = ""
 )
 
 func TestGetRecords(t *testing.T) {
