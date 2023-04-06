@@ -8,10 +8,10 @@ import (
 )
 
 var (
-	TAuthId       = ""
+	TAuthId       = "10341"
 	TSubAuthId    = ""
-	TAuthPassword = ""
-	TZone         = ""
+	TAuthPassword = "MU1DchJVnjfwpolTLYIi7NEgvrA3Buys"
+	TZone         = "wshops.info"
 )
 
 func TestGetRecords(t *testing.T) {
@@ -121,5 +121,11 @@ func TestSetRecords(t *testing.T) {
 	setRecord := setRecords[0]
 	if setRecord.Type != updatedRecord.Type || setRecord.Name != updatedRecord.Name || setRecord.Value != updatedRecord.Value || setRecord.TTL != updatedRecord.TTL {
 		t.Errorf("Record data mismatch: expected %+v, got %+v", updatedRecord, setRecord)
+	}
+
+	// Clean up the added record
+	_, err = provider.DeleteRecords(ctx, TZone, addedRecords)
+	if err != nil {
+		t.Errorf("Failed to clean up added record: %s", err)
 	}
 }
