@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/libdns/libdns"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,263 +13,235 @@ import (
 )
 
 type Client struct {
-	authId       string `json:"auth_id"`
-	subAuthId    string `json:"sub_auth_id"`
-	authPassword string `json:"auth_password"`
-	baseUrl      *url.URL
+	AuthId       string `json:"auth_id"`
+	SubAuthId    string `json:"sub_auth_id"`
+	AuthPassword string `json:"auth_password"`
 }
 
+var apiBaseUrl, _ = url.Parse("https://api.cloudns.net/dns/")
+
+// UseClient initializes and returns a new Client instance with provided authentication details.
 func UseClient(authId, subAuthId, authPassword string) *Client {
-	burl, _ := url.Parse("https://api.cloudns.net/dns/")
 	return &Client{
-		authId:       authId,
-		subAuthId:    subAuthId,
-		authPassword: authPassword,
-		baseUrl:      burl,
+		AuthId:       authId,
+		SubAuthId:    subAuthId,
+		AuthPassword: authPassword,
 	}
 }
 
-// GetRecords
-// @Description: Get all records of a zone
-// @Param ctx
-// @Param zone
+// GetRecords retrieves DNS records for the specified zone.
+// It returns a slice of libdns.Record or an error if the request fails.
 func (c *Client) GetRecords(ctx context.Context, zone string) ([]libdns.Record, error) {
-	endpoint := c.baseUrl.JoinPath("records.json")
-	resp, err := c.sendGetRequest(ctx, endpoint, map[string]string{
+	recordsEndpoint := apiBaseUrl.JoinPath("records.json")
+	resp, err := c.performGetRequest(ctx, recordsEndpoint, map[string]string{
 		"domain-name": zone,
 	})
-	defer resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	respContent, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+
 	var apiResult map[string]ApiDnsRecord
-	err = json.Unmarshal(respContent, &apiResult)
-	if err != nil {
-		return nil, errors.New(string(respContent))
+	if err := json.NewDecoder(resp.Body).Decode(&apiResult); err != nil {
+		return nil, errors.New("failed to decode response")
 	}
-	var records []libdns.Record
-	for _, v := range apiResult {
+
+	records := make([]libdns.Record, 0, len(apiResult))
+	for _, recordData := range apiResult {
 		records = append(records, libdns.Record{
-			ID:    v.Id,
-			Type:  v.Type,
-			Name:  v.Host,
-			TTL:   parseDuration(v.Ttl + "s"),
-			Value: v.Record,
+			ID:    recordData.Id,
+			Type:  recordData.Type,
+			Name:  recordData.Host,
+			TTL:   parseDuration(recordData.Ttl + "s"),
+			Value: recordData.Record,
 		})
 	}
 	return records, nil
 }
 
-// GetRecord
-// @Description: Get a record of a zone
-// @Param ctx
-// @Param zone
-// @Param recordId
-func (c *Client) GetRecord(ctx context.Context, zone string, recordId string) (*libdns.Record, error) {
-	rs, err := c.GetRecords(ctx, zone)
+// GetRecord retrieves a specific DNS record by its ID from the specified zone.
+// It returns a pointer to the matching libdns.Record or an error if the record is not found or the retrieval fails.
+func (c *Client) GetRecord(ctx context.Context, zone, recordID string) (*libdns.Record, error) {
+	records, err := c.GetRecords(ctx, zone)
 	if err != nil {
 		return nil, err
 	}
-	for _, v := range rs {
-		if v.ID == recordId {
-			return &v, nil
+	for _, record := range records {
+		if record.ID == recordID {
+			return &record, nil
 		}
 	}
 	return nil, errors.New("record not found")
 }
 
-// AddRecord
-// @Description: Add a record to a zone
-// @Param ctx
-// @Param zone
-// @Param recordType
-// @Param host
-// @Param record
-// @Param ttl
-func (c *Client) AddRecord(ctx context.Context, zone string, recordType string, host string, record string, ttl time.Duration) (*libdns.Record, error) {
-	endpoint := c.baseUrl.JoinPath("add-record.json")
-	resp, err := c.sendPostRequest(ctx, endpoint, map[string]string{
+// AddRecord creates a new DNS record in the specified zone with the given properties and returns the created record or an error.
+func (c *Client) AddRecord(ctx context.Context, zone string, recordType string, recordHost string, recordValue string, ttl time.Duration) (*libdns.Record, error) {
+	endpoint := apiBaseUrl.JoinPath("add-record.json")
+
+	roundedTTL := ttlRounder(ttl)
+	roundedTTLStr := strconv.Itoa(roundedTTL)
+
+	resp, err := c.performPostRequest(ctx, endpoint, map[string]string{
 		"domain-name": zone,
 		"record-type": recordType,
-		"host":        host,
-		"record":      record,
-		"ttl":         strconv.Itoa(ttlRounder(ttl)),
+		"host":        recordHost,
+		"record":      recordValue,
+		"ttl":         roundedTTLStr,
 	})
-	defer resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	respContent, err := io.ReadAll(resp.Body)
-	if err != nil {
+
+	var resultModel ApiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&resultModel); err != nil {
 		return nil, err
 	}
-	var resultModel *ApiResponse
-	err = json.Unmarshal(respContent, &resultModel)
-	if err != nil {
-		return nil, errors.New(string(respContent))
-	}
+
 	if resultModel.Status != "Success" {
 		return nil, errors.New(resultModel.StatusDescription)
 	}
+
+	parsedTTL := parseDuration(roundedTTLStr + "s")
+
 	return &libdns.Record{
 		ID:    strconv.Itoa(resultModel.Data.Id),
 		Type:  recordType,
-		Name:  host,
-		TTL:   parseDuration(strconv.Itoa(ttlRounder(ttl)) + "s"),
-		Value: record,
+		Name:  recordHost,
+		TTL:   parsedTTL,
+		Value: recordValue,
 	}, nil
 }
 
-// UpdateRecord
-// @Description: Update a record of a zone
-// @Param ctx
-// @Param zone
-// @Param recordId
-// @Param host
-// @Param record
-// @Param ttl
-func (c *Client) UpdateRecord(ctx context.Context, zone string, recordId string, host string, record string, ttl time.Duration) (*libdns.Record, error) {
-	endpoint := c.baseUrl.JoinPath("mod-record.json")
-	resp, err := c.sendPostRequest(ctx, endpoint, map[string]string{
+// UpdateRecord updates an existing DNS record in the specified zone with the provided values and returns the updated record.
+func (c *Client) UpdateRecord(ctx context.Context, zone string, recordID string, host string, recordValue string, ttl time.Duration) (*libdns.Record, error) {
+	updateEndpoint := apiBaseUrl.JoinPath("mod-record.json")
+
+	ttlSec := ttlRounder(ttl)
+	resp, err := c.performPostRequest(ctx, updateEndpoint, map[string]string{
 		"domain-name": zone,
-		"record-id":   recordId,
+		"record-id":   recordID,
 		"host":        host,
-		"record":      record,
-		"ttl":         strconv.Itoa(ttlRounder(ttl)),
+		"record":      recordValue,
+		"ttl":         strconv.Itoa(ttlSec),
 	})
-	defer resp.Body.Close()
+
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	respContent, err := io.ReadAll(resp.Body)
-	if err != nil {
+
+	var resultModel ApiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&resultModel); err != nil {
 		return nil, err
 	}
-	var resultModel *ApiResponse
-	err = json.Unmarshal(respContent, &resultModel)
-	if err != nil {
-		return nil, errors.New(string(respContent))
-	}
+
 	if resultModel.Status != "Success" {
 		return nil, errors.New(resultModel.StatusDescription)
 	}
-	getRecord, err := c.GetRecord(ctx, zone, recordId)
+
+	existingRecord, err := c.GetRecord(ctx, zone, recordID)
 	if err != nil {
 		return nil, err
 	}
+
 	return &libdns.Record{
-		ID:    recordId,
-		Type:  getRecord.Type,
+		ID:    recordID,
+		Type:  existingRecord.Type,
 		Name:  host,
-		TTL:   parseDuration(strconv.Itoa(ttlRounder(ttl)) + "s"),
-		Value: record,
+		TTL:   parseDuration(strconv.Itoa(ttlSec) + "s"),
+		Value: recordValue,
 	}, nil
 }
 
-// DeleteRecord
-// @Description: Delete a record of a zone
-// @Param ctx
-// @Param zone
-// @Param recordId
+// DeleteRecord deletes a DNS record identified by its ID in the specified zone.
+// It returns the deleted libdns.Record or nil if the record was not found, and an error if the operation fails.
 func (c *Client) DeleteRecord(ctx context.Context, zone string, recordId string) (*libdns.Record, error) {
 	rInfo, err := c.GetRecord(ctx, zone, recordId)
 	if err != nil {
 		if err.Error() == "record not found" {
 			return nil, nil
-		} else {
-			return nil, err
 		}
+		return nil, err
 	}
-	endpoint := c.baseUrl.JoinPath("delete-record.json")
-	resp, err := c.sendPostRequest(ctx, endpoint, map[string]string{
+
+	endpoint := apiBaseUrl.JoinPath("delete-record.json")
+	resp, err := c.performPostRequest(ctx, endpoint, map[string]string{
 		"domain-name": zone,
 		"record-id":   recordId,
 	})
-	defer resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
-	respContent, err := io.ReadAll(resp.Body)
-	if err != nil {
+
+	var resultModel ApiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&resultModel); err != nil {
 		return nil, err
 	}
-	var resultModel *ApiResponse
-	err = json.Unmarshal(respContent, &resultModel)
-	if err != nil {
-		return nil, errors.New(string(respContent))
-	}
+
 	if resultModel.Status != "Success" {
 		return nil, errors.New(resultModel.StatusDescription)
 	}
+
 	return rInfo, nil
 }
 
-// sendPostRequest
-// @Description: Send a post request to the API
-// @Param ctx
-// @Param reqUrl
-// @Param payload
-func (c *Client) sendPostRequest(ctx context.Context, reqUrl *url.URL, payload map[string]string) (*http.Response, error) {
-	queries := reqUrl.Query()
-	//fill in auth params
-	if c.subAuthId != "" {
-		queries.Set("sub-auth-id", c.subAuthId)
-	} else {
-		queries.Set("auth-id", c.authId)
-	}
-	queries.Set("auth-password", c.authPassword)
+// performPostRequest sends a POST request to the specified URL with query parameters and returns the HTTP response or an error.
+func (c *Client) performPostRequest(ctx context.Context, targetURL *url.URL, params map[string]string) (*http.Response, error) {
+	queries := targetURL.Query()
+	c.addAuthParams(queries)
 
-	//fill in payload
-	for k, v := range payload {
+	for k, v := range params {
 		queries.Set(k, v)
 	}
 
-	reqUrl.RawQuery = queries.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqUrl.String(), nil)
-	if err != nil {
-		return nil, err
+	targetURL.RawQuery = queries.Encode()
+	req, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), nil)
+	if requestErr != nil {
+		return nil, requestErr
 	}
+
 	return http.DefaultClient.Do(req)
 }
 
-// sendGetRequest
-// @Description: Send a get request to the API
-// @Param ctx
-// @Param reqUrl
-// @Param payload
-func (c *Client) sendGetRequest(ctx context.Context, reqUrl *url.URL, payload map[string]string) (*http.Response, error) {
-	queries := reqUrl.Query()
-	//fill in auth params
-	if c.subAuthId != "" {
-		queries.Set("sub-auth-id", c.subAuthId)
+// addAuthParams adds authentication parameters to the provided query values based on the client's credentials.
+func (c *Client) addAuthParams(queries url.Values) {
+	if c.SubAuthId != "" {
+		queries.Set("sub-auth-id", c.SubAuthId)
 	} else {
-		queries.Set("auth-id", c.authId)
+		queries.Set("auth-id", c.AuthId)
 	}
-	queries.Set("auth-password", c.authPassword)
+	queries.Set("auth-password", c.AuthPassword)
+}
 
-	//fill in payload
-	for k, v := range payload {
+// performGetRequest sends a GET request to the specified URL with query parameters and returns the HTTP response or an error.
+func (c *Client) performGetRequest(ctx context.Context, targetURL *url.URL, params map[string]string) (*http.Response, error) {
+	queries := targetURL.Query()
+	c.addAuthParams(queries) // Use extracted function instead of duplicating auth logic
+
+	for k, v := range params {
 		queries.Set(k, v)
 	}
 
-	reqUrl.RawQuery = queries.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqUrl.String(), nil)
+	targetURL.RawQuery = queries.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}

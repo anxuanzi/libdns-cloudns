@@ -9,12 +9,10 @@ import (
 
 // ClouDNS API docs: https://www.cloudns.net/wiki/article/41/
 
-var baseUrl = "https://api.cloudns.net/dns/"
-
-// Provider facilitates DNS record manipulation with <TODO: PROVIDER NAME>.
+// Provider facilitates DNS record manipulation with ClouDNS.
 type Provider struct {
 	AuthId       string `json:"auth_id"`
-	SubAuthId    string `json:"sub_auth_id"`
+	SubAuthId    string `json:"sub_auth_id,omitempty"`
 	AuthPassword string `json:"auth_password"`
 }
 
